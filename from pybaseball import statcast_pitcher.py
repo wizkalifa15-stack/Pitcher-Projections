@@ -547,8 +547,24 @@ def run_projection_for_pitcher(pitcher_id, opponent, pitcher_name=''):
         print("K >= 6:", round(prob_6_plus, 3))
         print("K >= 7:", round(prob_7_plus, 3))
 
+        return {
+            "avg_k":       round(avg_k, 2),
+            "avg_ip":      round(avg_ip, 2),
+            "avg_swstr":   round(avg_swstr, 3),
+            "avg_velo":    round(avg_velo, 1),
+            "avg_pitches": round(avg_pitches, 1),
+            "expected_k":  round(expected_k, 2),
+            "prob_5":      round(prob_5_plus, 3),
+            "prob_6":      round(prob_6_plus, 3),
+            "prob_7":      round(prob_7_plus, 3),
+            "opp_k_pct":   opp_k_rate,
+            "opp_woba":    opp_woba,
+            "opp_ops":     opp_ops,
+        }
+
     except Exception as e:
         print(f"Error analyzing pitcher {pitcher_id}: {e}")
+        return {"error": str(e)}
 
 
 # =========================
