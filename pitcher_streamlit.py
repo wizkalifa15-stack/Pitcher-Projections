@@ -78,10 +78,10 @@ if st.button("▶ Run Projections", type="primary", use_container_width=True):
             p3.metric("K ≥ 7", f"{d['prob_7']:.1%}")
 
             st.write("**Pitcher — last 14 days**")
-            s1, s2, s3 = st.columns(3)
-            s1.metric("Avg Velocity", f"{d['avg_velo']} mph")
-            s2.metric("Avg SwStr%",   f"{d['avg_swstr']:.1%}")
-            s3.metric("Avg Pitches",  f"{d['avg_pitches']}")
+            s1, s2 = st.columns(2)
+            velo_val = f"{d['avg_velo']} mph" if d.get('avg_velo') else "N/A"
+            s1.metric("Avg Velocity (season)", velo_val)
+            s2.metric("Avg Pitches", f"{d['avg_pitches']}")
 
             st.write("**Opponent Batting**")
             o1, o2, o3 = st.columns(3)

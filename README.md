@@ -1,2 +1,2 @@
 # Pitcher-Projections
-Get an edge on what sgonna happen in todays mlb slate 
+Get an edge on whats gonna happen in todays mlb slate 

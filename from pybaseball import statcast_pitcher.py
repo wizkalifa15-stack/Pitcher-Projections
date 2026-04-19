@@ -1,4 +1,4 @@
-from pybaseball import statcast_pitcher, statcast
+from pybaseball import playerid_lookup
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -403,36 +403,52 @@ def run_projection_for_pitcher(pitcher_id, opponent, pitcher_name=''):
 
     try:
         # =========================
-        # STEP 1: PULL DATA
+        # STEP 1: PULL DATA (MLB Stats API game log)
         # =========================
-        end_date = datetime.today()
-        start_date = end_date - timedelta(days=14)
+        now_et = get_current_et()
+        cutoff = now_et - timedelta(days=14)
+        season = now_et.year
 
-        df = statcast_pitcher(
-            start_dt=start_date.strftime("%Y-%m-%d"),
-            end_dt=end_date.strftime("%Y-%m-%d"),
-            player_id=pitcher_id
+        gamelog_url = (
+            f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+            f"?stats=gameLog&group=pitching&season={season}&sportId=1"
         )
+        gl_resp = requests.get(gamelog_url, headers=REQUEST_HEADERS, timeout=20)
+        gl_resp.raise_for_status()
+        gl_data = gl_resp.json()
 
-        if df is None or df.empty:
-            print(f"No recent data found for pitcher {pitcher_id}. Skipping.")
+        splits = []
+        for stat_block in gl_data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                game_date = pd.to_datetime(split.get('date', ''))
+                if game_date < pd.Timestamp(cutoff.date()):
+                    continue
+                s = split.get('stat', {})
+                ip_str = s.get('inningsPitched', '0')
+                # Convert "6.2" -> 6 + 2/3 innings
+                ip_parts = str(ip_str).split('.')
+                ip_val = int(ip_parts[0]) + (int(ip_parts[1]) / 3 if len(ip_parts) > 1 and ip_parts[1] else 0)
+                splits.append({
+                    'game_date': game_date,
+                    'strikeouts': int(s.get('strikeOuts', 0)),
+                    'innings_pitched': ip_val,
+                    'pitch_count': int(s.get('pitchesThrown', 0)),
+                })
+
+        if not splits:
+            print(f"No recent game log data found for pitcher {pitcher_id}. Skipping.")
             return
 
-        # Ensure game_date column exists and is datetime
-        if 'game_date' in df.columns:
-            df['game_date'] = pd.to_datetime(df['game_date'])
-        else:
-            print("game_date column not found in statcast data. Skipping.")
-            return
-
+        game_stats = pd.DataFrame(splits)
         print("Opponent:", opponent)
+        print(f"Games found in last 14 days: {len(game_stats)}")
 
         # Pull current season stats with a daily ET cache refresh
         team_stats_entry = get_opponent_stats(opponent)
         if team_stats_entry is None:
             print(f"Skipping projection for pitcher {pitcher_id} vs {opponent} - no opponent stats available")
             return
-        
+
         opp_k_rate = team_stats_entry['K%']
         opp_woba = team_stats_entry['wOBA']
         opp_ops = team_stats_entry['OPS']
@@ -440,54 +456,28 @@ def run_projection_for_pitcher(pitcher_id, opponent, pitcher_name=''):
         print_cache_status(opponent, team_stats_entry)
 
         # =========================
-        # STEP 2: FEATURE ENGINEERING
-        # =========================
-        # Create all new columns at once to avoid fragmentation warning
-        outs_events = [
-            'strikeout',
-            'field_out',
-            'force_out',
-            'grounded_into_double_play',
-            'double_play'
-        ]
-
-        new_columns = pd.DataFrame({
-            'is_strikeout': df['events'] == 'strikeout',
-            'swinging_strike': df['description'].isin([
-                'swinging_strike',
-                'swinging_strike_blocked'
-            ]),
-            'is_out': df['events'].isin(outs_events)
-        })
-
-        df = pd.concat([df, new_columns], axis=1)
-
-        # =========================
-        # STEP 3: GAME-LEVEL STATS
-        # =========================
-        game_stats = df.groupby('game_date').agg({
-            'is_strikeout': 'sum',
-            'pitch_number': 'count',
-            'swinging_strike': 'mean',
-            'release_speed': 'mean',
-            'is_out': 'sum'
-        }).rename(columns={
-            'is_strikeout': 'strikeouts',
-            'pitch_number': 'pitch_count',
-            'release_speed': 'avg_velocity',
-            'is_out': 'outs'
-        }).reset_index()
-
-        game_stats['innings_pitched'] = game_stats['outs'] / 3
-
-        # =========================
-        # STEP 4: AVERAGES (LAST 14 DAYS)
+        # STEP 2: AVERAGES (LAST 14 DAYS)
         # =========================
         avg_k = game_stats['strikeouts'].mean()
         avg_ip = game_stats['innings_pitched'].mean()
-        avg_swstr = game_stats['swinging_strike'].mean()
-        avg_velo = game_stats['avg_velocity'].mean()
         avg_pitches = game_stats['pitch_count'].mean()
+
+        # Season-average fastball velocity from Baseball Savant arsenal stats
+        avg_velo = None
+        try:
+            velo_url = (
+                f"https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+                f"?type=pitcher&pitchType=FF&year={season}&filteredResults=results&min=0"
+            )
+            velo_resp = requests.get(velo_url, headers=REQUEST_HEADERS, timeout=15)
+            velo_resp.raise_for_status()
+            velo_data = velo_resp.json()
+            for row in velo_data:
+                if str(row.get('pitcher_id', '')) == str(pitcher_id):
+                    avg_velo = row.get('avg_speed')
+                    break
+        except Exception as e:
+            print(f"Could not fetch velocity for {pitcher_id}: {e}")
 
         # =========================
         # STEP 5: MATCHUP-ADJUSTED PREDICTION
@@ -535,9 +525,8 @@ def run_projection_for_pitcher(pitcher_id, opponent, pitcher_name=''):
         print("=== Last 14 Days ===")
         print("Avg Strikeouts:", round(avg_k, 2))
         print("Avg Innings:", round(avg_ip, 2))
-        print("Avg SwStr%:", round(avg_swstr, 3))
-        print("Avg Velocity:", round(avg_velo, 1))
         print("Avg Pitch Count:", round(avg_pitches, 1))
+        print("Avg Velocity:", round(avg_velo, 1) if avg_velo else "N/A")
 
         print("\n=== Projection ===")
         print("Expected Strikeouts:", round(expected_k, 2))
@@ -550,9 +539,8 @@ def run_projection_for_pitcher(pitcher_id, opponent, pitcher_name=''):
         return {
             "avg_k":       round(avg_k, 2),
             "avg_ip":      round(avg_ip, 2),
-            "avg_swstr":   round(avg_swstr, 3),
-            "avg_velo":    round(avg_velo, 1),
             "avg_pitches": round(avg_pitches, 1),
+            "avg_velo":    round(avg_velo, 1) if avg_velo else None,
             "expected_k":  round(expected_k, 2),
             "prob_5":      round(prob_5_plus, 3),
             "prob_6":      round(prob_6_plus, 3),
